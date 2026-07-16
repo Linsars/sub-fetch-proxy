@@ -1,6 +1,5 @@
 const DEFAULT_USER_AGENT = 'Karing';
 
-// 需要透传的响应头（机场流量/到期信息）
 const PASS_THROUGH_RESPONSE_HEADERS = [
   'subscription-userinfo',
   'profile-update-interval',
@@ -11,9 +10,6 @@ const PASS_THROUGH_RESPONSE_HEADERS = [
   'cache-control',
 ];
 
-// 简单 token 防护（设为 null 则关闭）
-const PROXY_TOKEN = process.env.PROXY_TOKEN || null;
-
 function createCorsHeaders() {
   return {
     'access-control-allow-origin': '*',
@@ -23,99 +19,52 @@ function createCorsHeaders() {
   };
 }
 
-function applyHeaders(res, headers) {
-  for (const [key, value] of Object.entries(headers)) {
-    res.setHeader(key, value);
-  }
+function sanitize(v) {
+  return String(v || '').replace(/[\r\n]/g, '').trim();
 }
 
-function sanitizeHeaderValue(value) {
-  return String(value || '').replace(/[\r\n]/g, '').trim();
-}
+export const config = { runtime: 'edge' };
 
-function getUpstreamUserAgent(req, requestUrl) {
-  return sanitizeHeaderValue(
-    requestUrl.searchParams.get('ua') ||
-    req.headers['x-user-agent'] ||
-    DEFAULT_USER_AGENT
-  );
-}
-
-function sendText(res, statusCode, message) {
-  applyHeaders(res, createCorsHeaders());
-  res.statusCode = statusCode;
-  res.setHeader('content-type', 'text/plain; charset=utf-8');
-  res.end(message);
-}
-
-module.exports = async function handler(req, res) {
+export default async function handler(req) {
+  const url = new URL(req.url);
   if (req.method === 'OPTIONS') {
-    applyHeaders(res, createCorsHeaders());
-    res.statusCode = 204;
-    res.end();
-    return;
+    return new Response(null, { status: 204, headers: createCorsHeaders() });
   }
-
   if (!['GET', 'HEAD'].includes(req.method)) {
-    sendText(res, 405, 'Method Not Allowed');
-    return;
+    return new Response('Method Not Allowed', { status: 405, headers: createCorsHeaders() });
   }
-
-  // token 校验
-  const requestUrl = new URL(req.url, `https://${req.headers.host || 'localhost'}`);
-  if (PROXY_TOKEN) {
-    const token = requestUrl.searchParams.get('token') || req.headers['x-proxy-token'];
-    if (token !== PROXY_TOKEN) {
-      sendText(res, 401, 'Unauthorized');
-      return;
-    }
-  }
-
-  const targetUrl = requestUrl.searchParams.get('url');
+  const targetUrl = url.searchParams.get('url');
   if (!targetUrl) {
-    sendText(res, 400, 'Miss URL');
-    return;
+    return new Response('Miss URL', { status: 400, headers: createCorsHeaders() });
   }
-
-  let parsedTarget;
+  let parsed;
   try {
-    parsedTarget = new URL(targetUrl);
+    parsed = new URL(targetUrl);
   } catch {
-    sendText(res, 400, 'Invalid URL');
-    return;
+    return new Response('Invalid URL', { status: 400, headers: createCorsHeaders() });
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    return new Response('Only http/https allowed', { status: 400, headers: createCorsHeaders() });
   }
 
-  if (!['http:', 'https:'].includes(parsedTarget.protocol)) {
-    sendText(res, 400, 'Only http/https URLs are allowed');
-    return;
-  }
+  const ua = sanitize(url.searchParams.get('ua') || req.headers.get('x-user-agent') || DEFAULT_USER_AGENT);
 
-  const upstreamResponse = await fetch(parsedTarget.toString(), {
+  const upstream = await fetch(parsed.toString(), {
     method: req.method === 'HEAD' ? 'HEAD' : 'GET',
     redirect: 'follow',
-    headers: {
-      'user-agent': getUpstreamUserAgent(req, requestUrl),
-      'accept': '*/*',
-    },
+    headers: { 'user-agent': ua, 'accept': '*/*' },
   });
 
-  const responseHeaders = createCorsHeaders();
-  for (const headerName of PASS_THROUGH_RESPONSE_HEADERS) {
-    const value = upstreamResponse.headers.get(headerName);
-    if (value) responseHeaders[headerName] = value;
+  const headers = createCorsHeaders();
+  for (const h of PASS_THROUGH_RESPONSE_HEADERS) {
+    const v = upstream.headers.get(h);
+    if (v) headers[h] = v;
   }
-  if (!responseHeaders['content-type']) {
-    responseHeaders['content-type'] = 'text/plain; charset=utf-8';
-  }
-
-  applyHeaders(res, responseHeaders);
-  res.statusCode = upstreamResponse.status;
+  if (!headers['content-type']) headers['content-type'] = 'text/plain; charset=utf-8';
 
   if (req.method === 'HEAD') {
-    res.end();
-    return;
+    return new Response(null, { status: upstream.status, headers });
   }
 
-  const body = Buffer.from(await upstreamResponse.arrayBuffer());
-  res.end(body);
-};
+  return new Response(upstream.body, { status: upstream.status, headers });
+}
