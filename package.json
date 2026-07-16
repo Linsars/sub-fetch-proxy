@@ -1,0 +1,10 @@
+{
+  "name": "sub-fetch-proxy",
+  "version": "1.0.0",
+  "description": "Fetch proxy for Sub-Store Bot — bypass Cloudflare Worker fetch restrictions",
+  "main": "api/index.js",
+  "scripts": {
+    "start": "vercel dev"
+  },
+  "license": "MIT"
+}
