@@ -19,52 +19,91 @@ function createCorsHeaders() {
   };
 }
 
-function sanitize(v) {
-  return String(v || '').replace(/[\r\n]/g, '').trim();
+function applyHeaders(res, headers) {
+  for (const [key, value] of Object.entries(headers)) {
+    res.setHeader(key, value);
+  }
 }
 
-export const config = { runtime: 'edge' };
+function sanitizeHeaderValue(value) {
+  return String(value || '').replace(/[\r\n]/g, '').trim();
+}
 
-export default async function handler(req) {
-  const url = new URL(req.url);
+function getUpstreamUserAgent(req, requestUrl) {
+  return sanitizeHeaderValue(
+    requestUrl.searchParams.get('ua') ||
+    req.headers['x-user-agent'] ||
+    DEFAULT_USER_AGENT
+  );
+}
+
+function sendText(res, statusCode, message) {
+  applyHeaders(res, createCorsHeaders());
+  res.statusCode = statusCode;
+  res.setHeader('content-type', 'text/plain; charset=utf-8');
+  res.end(message);
+}
+
+module.exports = async function handler(req, res) {
   if (req.method === 'OPTIONS') {
-    return new Response(null, { status: 204, headers: createCorsHeaders() });
+    applyHeaders(res, createCorsHeaders());
+    res.statusCode = 204;
+    res.end();
+    return;
   }
+
   if (!['GET', 'HEAD'].includes(req.method)) {
-    return new Response('Method Not Allowed', { status: 405, headers: createCorsHeaders() });
+    sendText(res, 405, 'Method Not Allowed');
+    return;
   }
-  const targetUrl = url.searchParams.get('url');
+
+  const requestUrl = new URL(req.url, `https://${req.headers.host || 'localhost'}`);
+  const targetUrl = requestUrl.searchParams.get('url');
+
   if (!targetUrl) {
-    return new Response('Miss URL', { status: 400, headers: createCorsHeaders() });
+    sendText(res, 400, 'Miss URL');
+    return;
   }
-  let parsed;
+
+  let parsedTarget;
   try {
-    parsed = new URL(targetUrl);
+    parsedTarget = new URL(targetUrl);
   } catch {
-    return new Response('Invalid URL', { status: 400, headers: createCorsHeaders() });
-  }
-  if (!['http:', 'https:'].includes(parsed.protocol)) {
-    return new Response('Only http/https allowed', { status: 400, headers: createCorsHeaders() });
+    sendText(res, 400, 'Invalid URL');
+    return;
   }
 
-  const ua = sanitize(url.searchParams.get('ua') || req.headers.get('x-user-agent') || DEFAULT_USER_AGENT);
+  if (!['http:', 'https:'].includes(parsedTarget.protocol)) {
+    sendText(res, 400, 'Only http/https URLs are allowed');
+    return;
+  }
 
-  const upstream = await fetch(parsed.toString(), {
+  const upstreamResponse = await fetch(parsedTarget.toString(), {
     method: req.method === 'HEAD' ? 'HEAD' : 'GET',
     redirect: 'follow',
-    headers: { 'user-agent': ua, 'accept': '*/*' },
+    headers: {
+      'user-agent': getUpstreamUserAgent(req, requestUrl),
+      'accept': '*/*',
+    },
   });
 
-  const headers = createCorsHeaders();
-  for (const h of PASS_THROUGH_RESPONSE_HEADERS) {
-    const v = upstream.headers.get(h);
-    if (v) headers[h] = v;
+  const responseHeaders = createCorsHeaders();
+  for (const headerName of PASS_THROUGH_RESPONSE_HEADERS) {
+    const value = upstreamResponse.headers.get(headerName);
+    if (value) responseHeaders[headerName] = value;
   }
-  if (!headers['content-type']) headers['content-type'] = 'text/plain; charset=utf-8';
+  if (!responseHeaders['content-type']) {
+    responseHeaders['content-type'] = 'text/plain; charset=utf-8';
+  }
+
+  applyHeaders(res, responseHeaders);
+  res.statusCode = upstreamResponse.status;
 
   if (req.method === 'HEAD') {
-    return new Response(null, { status: upstream.status, headers });
+    res.end();
+    return;
   }
 
-  return new Response(upstream.body, { status: upstream.status, headers });
-}
+  const body = Buffer.from(await upstreamResponse.arrayBuffer());
+  res.end(body);
+};
