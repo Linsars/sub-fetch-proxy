@@ -78,14 +78,20 @@ module.exports = async function handler(req, res) {
     return;
   }
 
-  const upstreamResponse = await fetch(parsedTarget.toString(), {
-    method: req.method === 'HEAD' ? 'HEAD' : 'GET',
-    redirect: 'follow',
-    headers: {
-      'user-agent': getUpstreamUserAgent(req, requestUrl),
-      'accept': '*/*',
-    },
-  });
+  let upstreamResponse;
+  try {
+    upstreamResponse = await fetch(parsedTarget.toString(), {
+      method: req.method === 'HEAD' ? 'HEAD' : 'GET',
+      redirect: 'follow',
+      headers: {
+        'user-agent': getUpstreamUserAgent(req, requestUrl),
+        'accept': '*/*',
+      },
+    });
+  } catch (e) {
+    sendText(res, 502, 'Upstream fetch failed: ' + e.message + '\n' + (e.stack || '').slice(0, 300));
+    return;
+  }
 
   const responseHeaders = createCorsHeaders();
   for (const headerName of PASS_THROUGH_RESPONSE_HEADERS) {
