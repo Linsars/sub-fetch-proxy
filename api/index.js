@@ -44,6 +44,14 @@ function sendText(res, statusCode, message) {
   res.end(message);
 }
 
+// 诊断端点：测试函数能否出站
+function sendDiag(res, info) {
+  applyHeaders(res, createCorsHeaders());
+  res.statusCode = 200;
+  res.setHeader('content-type', 'application/json; charset=utf-8');
+  res.end(JSON.stringify(info, null, 2));
+}
+
 module.exports = async function handler(req, res) {
   if (req.method === 'OPTIONS') {
     applyHeaders(res, createCorsHeaders());
@@ -52,14 +60,33 @@ module.exports = async function handler(req, res) {
     return;
   }
 
+  const requestUrl = new URL(req.url, `https://${req.headers.host || 'localhost'}`);
+
+  // 诊断模式
+  if (requestUrl.searchParams.get('diag') === '1') {
+    const diag = { fetchType: typeof fetch, node: process.version };
+    try {
+      const r = await fetch('https://vercel.com', { method: 'GET' });
+      diag.vercelSelfFetch = { status: r.status, len: (await r.text()).length };
+    } catch (e) {
+      diag.vercelSelfFetch = { error: e.message };
+    }
+    try {
+      const r2 = await fetch('https://example.com', { method: 'GET' });
+      diag.exampleFetch = { status: r2.status, len: (await r2.text()).length };
+    } catch (e) {
+      diag.exampleFetch = { error: e.message };
+    }
+    sendDiag(res, diag);
+    return;
+  }
+
   if (!['GET', 'HEAD'].includes(req.method)) {
     sendText(res, 405, 'Method Not Allowed');
     return;
   }
 
-  const requestUrl = new URL(req.url, `https://${req.headers.host || 'localhost'}`);
   const targetUrl = requestUrl.searchParams.get('url');
-
   if (!targetUrl) {
     sendText(res, 400, 'Miss URL');
     return;
@@ -89,7 +116,7 @@ module.exports = async function handler(req, res) {
       },
     });
   } catch (e) {
-    sendText(res, 502, 'Upstream fetch failed: ' + e.message + '\n' + (e.stack || '').slice(0, 300));
+    sendText(res, 502, 'Upstream fetch failed: ' + e.message);
     return;
   }
 
